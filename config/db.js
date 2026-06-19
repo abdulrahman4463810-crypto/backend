@@ -2,7 +2,6 @@ const mongoose = require("mongoose");
 
 const DB_NAME = "lotte_kolson_store";
 
-// Vercel serverless me connection cache zaroori hota hai
 let cached = global.__LOTTE_KOLSON_MONGO_CACHE__;
 
 if (!cached) {
@@ -18,21 +17,12 @@ function cleanMongoUri(value) {
 
   let uri = String(value).trim();
 
-  // Agar galti se value me MONGO_URI= bhi paste ho gaya ho
   uri = uri.replace(/^MONGO_URI\s*=\s*/i, "").trim();
-
-  // Quotes remove
   uri = uri.replace(/^["']|["']$/g, "").trim();
 
-  // Agar galti se 2 URI paste ho gaye hon, first valid URI use karega
   const firstMongoIndex = uri.indexOf("mongodb");
   if (firstMongoIndex > 0) {
     uri = uri.slice(firstMongoIndex).trim();
-  }
-
-  const secondMongoIndex = uri.indexOf(" mongodb", 10);
-  if (secondMongoIndex !== -1) {
-    uri = uri.slice(0, secondMongoIndex).trim();
   }
 
   if (!uri.startsWith("mongodb://") && !uri.startsWith("mongodb+srv://")) {
@@ -47,7 +37,6 @@ function getMongoUri() {
 
   if (uri) return uri;
 
-  // Local development fallback only
   if (!process.env.VERCEL && process.env.NODE_ENV !== "production") {
     return `mongodb://127.0.0.1:27017/${DB_NAME}`;
   }
@@ -75,9 +64,7 @@ async function connectDB() {
   const uri = getMongoUri();
 
   if (!uri) {
-    console.error(
-      "MongoDB connection failed: MONGO_URI is missing or invalid in Vercel Environment Variables."
-    );
+    console.error("MongoDB connection failed: MONGO_URI missing or invalid.");
     return null;
   }
 
@@ -109,9 +96,7 @@ async function connectDB() {
       .catch((error) => {
         cached.promise = null;
         cached.conn = null;
-
         console.error("MongoDB connection failed:", error.message);
-
         return null;
       });
   }
