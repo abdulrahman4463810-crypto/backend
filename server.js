@@ -1,4 +1,8 @@
-require("dotenv").config();
+// Load .env only for local development.
+// On Vercel, environment variables come from Vercel Dashboard.
+if (!process.env.VERCEL) {
+  require("dotenv").config();
+}
 
 const express = require("express");
 const cors = require("cors");
@@ -13,23 +17,30 @@ const app = express();
 const isProduction =
   process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
 
+function normalizeOrigin(origin) {
+  return String(origin || "").trim().replace(/\/+$/, "");
+}
+
 // Allowed frontend URLs
 function allowedOrigins() {
   const envOrigins = String(
     process.env.CLIENT_URL || process.env.FRONTEND_URL || ""
   )
     .split(",")
-    .map((origin) => origin.trim())
+    .map(normalizeOrigin)
     .filter(Boolean);
 
-  // Local + deployed frontend fallback
   const defaultOrigins = [
     "http://localhost:5173",
     "http://localhost:3000",
     "https://kolsonstore.netlify.app",
-  ];
+  ].map(normalizeOrigin);
 
   return [...new Set([...envOrigins, ...defaultOrigins])];
+}
+
+function hasMongoEnv() {
+  return Boolean(process.env.MONGO_URI || process.env.MONGODB_URI);
 }
 
 // Vercel / proxy support
@@ -39,6 +50,7 @@ app.set("trust proxy", 1);
 app.use(
   helmet({
     crossOriginResourcePolicy: false,
+    crossOriginEmbedderPolicy: false,
   })
 );
 
@@ -47,33 +59,36 @@ const corsOptions = {
   origin(origin, callback) {
     const origins = allowedOrigins();
 
-    // Postman, server-to-server, same-origin requests
+    // Allow Postman, curl, server-to-server, same-origin requests
     if (!origin) {
       return callback(null, true);
     }
 
-    if (origins.includes(origin)) {
+    const cleanOrigin = normalizeOrigin(origin);
+
+    if (origins.includes(cleanOrigin)) {
       return callback(null, true);
     }
 
-    return callback(new Error(`CORS blocked this origin: ${origin}`));
+    console.error("CORS blocked origin:", cleanOrigin);
+    console.error("Allowed origins:", origins);
+
+    return callback(new Error(`CORS blocked this origin: ${cleanOrigin}`));
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
+  optionsSuccessStatus: 204,
 };
 
 app.use(cors(corsOptions));
-
-// Express 5 me app.options("*") kabhi error deta hai,
-// isliye regex use kiya hai.
 app.options(/.*/, cors(corsOptions));
 
 // Body parser
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 
-// Dev logging
+// Logging
 if (!isProduction) {
   app.use(morgan("dev"));
 }
@@ -85,7 +100,9 @@ app.use(
     max: 1000,
     standardHeaders: true,
     legacyHeaders: false,
+    skip: (req) => req.path === "/" || req.path === "/api/health",
     message: {
+      success: false,
       message: "Too many requests. Please try again later.",
     },
   })
@@ -93,11 +110,13 @@ app.use(
 
 // Root route
 app.get("/", (req, res) => {
-  res.status(200).json({
+  return res.status(200).json({
     success: true,
     message: "LOTTE KOLSON STORE MANAGEMENT SYSTEM API RUNNING",
     status: "ok",
     platform: process.env.VERCEL ? "vercel" : "node",
+    mongoUriDefined: Boolean(process.env.MONGO_URI),
+    mongodbUriDefined: Boolean(process.env.MONGODB_URI),
     frontend: allowedOrigins(),
   });
 });
@@ -106,34 +125,53 @@ app.get("/", (req, res) => {
 app.get("/api/health", async (req, res) => {
   try {
     const connection = await connectDB();
+    const mongoEnvAvailable = hasMongoEnv();
 
     return res.status(200).json({
       success: true,
       status: "ok",
       database: connection ? "connected" : "not_connected",
-      ownerSeed: connection ? "enabled" : "waiting_for_mongo_uri",
+      ownerSeed: connection
+        ? "enabled"
+        : mongoEnvAvailable
+        ? "mongo_connection_failed"
+        : "waiting_for_mongo_uri",
+      mongoUriDefined: Boolean(process.env.MONGO_URI),
+      mongodbUriDefined: Boolean(process.env.MONGODB_URI),
       platform: process.env.VERCEL ? "vercel" : "node",
     });
   } catch (error) {
+    console.error("Health check failed:", error.message);
+
     return res.status(500).json({
       success: false,
       status: "error",
       database: "not_connected",
       message: error.message || "MongoDB health check failed",
+      mongoUriDefined: Boolean(process.env.MONGO_URI),
+      mongodbUriDefined: Boolean(process.env.MONGODB_URI),
+      platform: process.env.VERCEL ? "vercel" : "node",
     });
   }
 });
 
-// MongoDB connection middleware for all /api routes
+// MongoDB connection middleware for all API routes except health
 app.use("/api", async (req, res, next) => {
   try {
+    if (req.path === "/health") {
+      return next();
+    }
+
     const connection = await connectDB();
 
     if (!connection) {
       return res.status(500).json({
         success: false,
-        message:
-          "MongoDB not connected. Add a valid MONGO_URI in Vercel Environment Variables.",
+        message: hasMongoEnv()
+          ? "MongoDB URI found, but database connection failed. Check Atlas password, database user permissions, and Network Access 0.0.0.0/0."
+          : "MongoDB not connected. Add MONGO_URI or MONGODB_URI in Vercel Environment Variables.",
+        mongoUriDefined: Boolean(process.env.MONGO_URI),
+        mongodbUriDefined: Boolean(process.env.MONGODB_URI),
       });
     }
 
@@ -164,7 +202,7 @@ app.use((req, res) => {
 
 // Global error handler
 app.use((err, req, res, next) => {
-  console.error("Server Error:", err);
+  console.error("Server Error:", err.message || err);
 
   const status = err.status || err.statusCode || 500;
 
@@ -187,7 +225,9 @@ if (require.main === module) {
     })
     .catch((error) => {
       console.error("Failed to start server:", error.message);
-      process.exit(1);
+      app.listen(PORT, () => {
+        console.log(`Server running without MongoDB on port ${PORT}`);
+      });
     });
 }
 
