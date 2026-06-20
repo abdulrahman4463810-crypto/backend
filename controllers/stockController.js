@@ -417,20 +417,21 @@ exports.importStock = async (req, res, next) => {
     let imported = 0;
     let skipped = 0;
     let duplicateInFile = 0;
+    let alreadyExisting = 0;
 
     const seenInFile = new Set();
 
     for (const row of rows) {
       const itemCode = cleanText(row.itemCode);
-      const key = `${category.toLowerCase()}::${itemCode.toLowerCase()}`;
+      const duplicateKey = `${category.toLowerCase()}::${itemCode.toLowerCase()}`;
 
-      if (seenInFile.has(key)) {
+      if (seenInFile.has(duplicateKey)) {
         duplicateInFile += 1;
         skipped += 1;
         continue;
       }
 
-      seenInFile.add(key);
+      seenInFile.add(duplicateKey);
 
       const exists = await StockItem.exists({
         category,
@@ -438,6 +439,7 @@ exports.importStock = async (req, res, next) => {
       });
 
       if (exists) {
+        alreadyExisting += 1;
         skipped += 1;
         continue;
       }
@@ -457,14 +459,16 @@ exports.importStock = async (req, res, next) => {
       imported,
       skipped,
       duplicateInFile,
+      alreadyExisting,
     });
 
     res.status(201).json({
-      message: `Stock import completed. Imported ${imported}, skipped ${skipped} already existing/duplicate rows.`,
+      message: `Stock import completed. Total ${rows.length}, imported ${imported}, skipped ${skipped}.`,
       totalRows: rows.length,
       imported,
       skipped,
       duplicateInFile,
+      alreadyExisting,
     });
   } catch (e) {
     console.error("Stock import failed:", e);
