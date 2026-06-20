@@ -30,7 +30,7 @@ const categoryMap = {
 
 function normalizeCategory(param) {
   const key = String(param || "").trim().toLowerCase();
-  return categoryMap[key] || param;
+  return categoryMap[key] || String(param || "").trim();
 }
 
 function firstValue(row, keys) {
@@ -92,6 +92,7 @@ function stockPayload(row, category) {
 
   return {
     category,
+
     srNo: toNumber(
       firstValue(row, ["srNo", "Sr No", "Sr", "SR #", "S No", "S.No"])
     ),
@@ -104,10 +105,8 @@ function stockPayload(row, category) {
         "Code",
         "Item No",
         "Item #",
-
         "Services Code",
         "Service Code",
-
         "Patty Cash Code",
         "Petty Cash Code",
       ])
@@ -121,18 +120,14 @@ function stockPayload(row, category) {
         "Description",
         "Item Name",
         "ITEM NAME",
-
         "Services Description",
         "Service Description",
-
         "Patty Cash Item Description",
         "Petty Cash Item Description",
       ])
     ),
 
-    uom: cleanText(
-      firstValue(row, ["uom", "UOM", "Unit", "Units"])
-    ),
+    uom: cleanText(firstValue(row, ["uom", "UOM", "Unit", "Units"])),
 
     openingQty,
     inwardQty,
@@ -193,6 +188,17 @@ exports.createStock = async (req, res, next) => {
       category: normalizeCategory(req.body.category || req.params.category),
     };
 
+    payload.itemCode = cleanText(payload.itemCode);
+    payload.itemDescription = cleanText(payload.itemDescription);
+    payload.uom = cleanText(payload.uom);
+    payload.location = cleanText(payload.location);
+
+    if (!payload.itemCode || !payload.itemDescription) {
+      return res.status(400).json({
+        message: "Item Code and Item Description are required",
+      });
+    }
+
     payload.openingQty = Number(payload.openingQty || 0);
     payload.inwardQty = Number(payload.inwardQty || 0);
     payload.issuedQty = Number(payload.issuedQty || 0);
@@ -203,9 +209,23 @@ exports.createStock = async (req, res, next) => {
 
     payload.totalValue = payload.balanceQty * payload.unitPrice;
 
-    const item = await StockItem.create(payload);
+    const item = await StockItem.findOneAndUpdate(
+      {
+        itemCode: payload.itemCode,
+        category: payload.category,
+      },
+      {
+        $set: payload,
+      },
+      {
+        upsert: true,
+        new: true,
+        runValidators: true,
+        setDefaultsOnInsert: true,
+      }
+    );
 
-    await audit(req, "CREATE", "STOCK", item.toObject());
+    await audit(req, "UPSERT", "STOCK", item.toObject());
 
     res.status(201).json(item);
   } catch (e) {
@@ -215,7 +235,29 @@ exports.createStock = async (req, res, next) => {
 
 exports.updateStock = async (req, res, next) => {
   try {
-    const item = await StockItem.findByIdAndUpdate(req.params.id, req.body, {
+    const payload = { ...req.body };
+
+    if (payload.itemCode !== undefined) payload.itemCode = cleanText(payload.itemCode);
+    if (payload.itemDescription !== undefined) payload.itemDescription = cleanText(payload.itemDescription);
+    if (payload.uom !== undefined) payload.uom = cleanText(payload.uom);
+    if (payload.location !== undefined) payload.location = cleanText(payload.location);
+
+    if (
+      payload.openingQty !== undefined ||
+      payload.inwardQty !== undefined ||
+      payload.issuedQty !== undefined ||
+      payload.unitPrice !== undefined
+    ) {
+      payload.openingQty = Number(payload.openingQty || 0);
+      payload.inwardQty = Number(payload.inwardQty || 0);
+      payload.issuedQty = Number(payload.issuedQty || 0);
+      payload.unitPrice = Number(payload.unitPrice || 0);
+      payload.balanceQty =
+        payload.openingQty + payload.inwardQty - payload.issuedQty;
+      payload.totalValue = payload.balanceQty * payload.unitPrice;
+    }
+
+    const item = await StockItem.findByIdAndUpdate(req.params.id, payload, {
       new: true,
       runValidators: true,
     });
@@ -278,7 +320,6 @@ exports.importStock = async (req, res, next) => {
     const category = normalizeCategory(req.params.category);
 
     const wb = await workbookFromBuffer(req.file.buffer);
-
     const ws = selectWorksheet(wb, req.body.sheetName || category);
 
     if (!ws) {
@@ -294,14 +335,14 @@ exports.importStock = async (req, res, next) => {
     if (!rows.length) {
       return res.status(400).json({
         message:
-          "No valid stock rows found. Item Code and Item Description are required.",
+          "No valid stock rows found. Please check Excel headers: Item Code and Item Description.",
       });
     }
 
     let imported = 0;
 
     for (const row of rows) {
-      await StockItem.updateOne(
+      await StockItem.findOneAndUpdate(
         {
           itemCode: row.itemCode,
           category,
@@ -311,7 +352,9 @@ exports.importStock = async (req, res, next) => {
         },
         {
           upsert: true,
+          new: true,
           runValidators: true,
+          setDefaultsOnInsert: true,
         }
       );
 
@@ -328,6 +371,7 @@ exports.importStock = async (req, res, next) => {
       imported,
     });
   } catch (e) {
+    console.error("Stock import failed:", e);
     next(e);
   }
 };
