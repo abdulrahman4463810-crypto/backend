@@ -139,6 +139,71 @@ function rowToTransaction(row, type) {
   return payload;
 }
 
+function normalizeFallbackPayload(row, type) {
+  const payload = {
+    ...row,
+    type,
+    itemCode: cleanText(row.itemCode),
+    itemDescription: cleanText(row.itemDescription),
+    category: categoryValue(row.category),
+    uom: cleanText(row.uom),
+    department: cleanText(row.department),
+    unitPrice: Number(row.unitPrice || 0),
+    total: Number(row.total || 0),
+  };
+
+  if (type === "inward") {
+    payload.deliveryDate = row.deliveryDate || new Date();
+    payload.qtyReceived = Number(row.qtyReceived || 0);
+    payload.openQty = Number(row.openQty || 0);
+
+    if (!payload.total) {
+      payload.total = payload.qtyReceived * payload.unitPrice;
+    }
+
+    payload.vendorSupplier = cleanText(row.vendorSupplier);
+    payload.receivedBy = cleanText(row.receivedBy);
+    payload.grnStatusWithDate = cleanText(row.grnStatusWithDate);
+  } else {
+    payload.date = row.date || new Date();
+    payload.qtyIssued = Number(row.qtyIssued || 0);
+    payload.balanceQty = Number(row.balanceQty || 0);
+
+    if (!payload.total) {
+      payload.total = payload.qtyIssued * payload.unitPrice;
+    }
+
+    payload.equipmentName = cleanText(row.equipmentName);
+    payload.subEquipmentName = cleanText(row.subEquipmentName);
+    payload.issuedTo = cleanText(row.issuedTo);
+    payload.shift = cleanText(row.shift);
+  }
+
+  return payload;
+}
+
+async function buildImportPayload(row, type) {
+  try {
+    const payload = await applyTransactionPayload(row, type);
+    payload.type = type;
+    return payload;
+  } catch (err) {
+    const payload = normalizeFallbackPayload(row, type);
+    payload._lookupWarning = err.message;
+    return payload;
+  }
+}
+
+async function safeRecalcStock(itemCode, category) {
+  try {
+    if (itemCode && category) {
+      await recalcStock(itemCode, category);
+    }
+  } catch (err) {
+    console.warn(`Stock recalc skipped for ${itemCode}:`, err.message);
+  }
+}
+
 exports.getTransactions = async (req, res, next) => {
   try {
     const type = txType(req.params.type);
@@ -267,7 +332,7 @@ exports.deleteAllTransactions = async (req, res, next) => {
 
     for (const key of uniqueItems) {
       const [itemCode, category] = key.split("||");
-      await recalcStock(itemCode, category);
+      await safeRecalcStock(itemCode, category);
     }
 
     await audit(req, "DELETE_ALL", type.toUpperCase(), {
@@ -307,12 +372,14 @@ exports.importTransactions = async (req, res, next) => {
       });
     }
 
-    const rows = mapExcelRows(
+    const mappedRows = mapExcelRows(
       ws,
       type === "inward" ? inwardColumns : issueColumns
-    )
+    );
+
+    const rows = mappedRows
       .map((row) => rowToTransaction(row, type))
-      .filter((row) => row.itemCode);
+      .filter((row) => cleanText(row.itemCode));
 
     if (!rows.length) {
       return res.status(400).json({
@@ -321,23 +388,21 @@ exports.importTransactions = async (req, res, next) => {
     }
 
     let imported = 0;
+    let lookupWarnings = 0;
     const failed = [];
-
-    /*
-      IMPORTANT:
-      Inward aur Issuance me duplicate skip nahi karna.
-      Same itemCode baar baar allowed hai.
-      Har row new transaction ke tor par add hogi.
-    */
 
     for (const row of rows) {
       try {
-        const payload = await applyTransactionPayload(row, type);
-        payload.type = type;
+        const payload = await buildImportPayload(row, type);
+
+        if (payload._lookupWarning) {
+          lookupWarnings += 1;
+          delete payload._lookupWarning;
+        }
 
         const saved = await Transaction.create(payload);
 
-        await recalcStock(saved.itemCode, saved.category);
+        await safeRecalcStock(saved.itemCode, saved.category);
 
         imported += 1;
       } catch (err) {
@@ -353,6 +418,7 @@ exports.importTransactions = async (req, res, next) => {
       totalRows: rows.length,
       imported,
       failed: failed.length,
+      lookupWarnings,
     });
 
     if (!imported) {
@@ -360,19 +426,24 @@ exports.importTransactions = async (req, res, next) => {
         message: `No rows imported. First error: ${
           failed[0]?.message || "Invalid data"
         }`,
+        totalRows: rows.length,
         imported,
         failed: failed.length,
+        lookupWarnings,
         failedRows: failed.slice(0, 20),
       });
     }
 
     res.status(201).json({
-      message: `Transactions imported successfully. Imported ${imported} rows${
+      message: `${
+        type === "inward" ? "Inward" : "Issuance"
+      } import completed. Total ${rows.length}, imported ${imported}${
         failed.length ? `, failed ${failed.length}` : ""
-      }.`,
+      }${lookupWarnings ? `, lookup warnings ${lookupWarnings}` : ""}.`,
       totalRows: rows.length,
       imported,
       failed: failed.length,
+      lookupWarnings,
       failedRows: failed.slice(0, 20),
     });
   } catch (e) {
