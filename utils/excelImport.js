@@ -10,9 +10,11 @@ function cleanText(value) {
   if (typeof value === "object") {
     if (value.text) return String(value.text).trim();
     if (value.result !== undefined) return cleanText(value.result);
+
     if (Array.isArray(value.richText)) {
       return value.richText.map((x) => x.text || "").join("").trim();
     }
+
     if (value.formula || value.sharedFormula) {
       return cleanText(value.result ?? "");
     }
@@ -36,21 +38,34 @@ function compactKey(value) {
 
 function toNumber(value) {
   if (value === null || value === undefined || value === "") return 0;
+
+  if (typeof value === "object" && value.result !== undefined) {
+    value = value.result;
+  }
+
   const n = Number(String(value).replace(/,/g, "").trim());
+
   return Number.isFinite(n) ? n : 0;
 }
 
 function monthNameFromDate(value) {
   if (!value) return "";
+
   const d = value instanceof Date ? value : new Date(value);
+
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString("en-US", { month: "long", year: "numeric" });
+
+  return d.toLocaleString("en-US", {
+    month: "long",
+    year: "numeric",
+  });
 }
 
 function dateValue(value) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
     return value.toISOString().slice(0, 10);
   }
+
   return cleanText(value);
 }
 
@@ -90,8 +105,10 @@ async function workbookFromBuffer(buffer) {
     raw,
     SheetNames: sheetNames,
     worksheets,
+
     getWorksheet(name) {
       const requested = compactKey(name);
+
       return (
         worksheets.find((ws) => compactKey(ws.name) === requested) || null
       );
@@ -116,7 +133,12 @@ function selectWorksheet(wb, requestedSheet) {
 
     const fuzzy = worksheets.find((ws) => {
       const sheetKey = compactKey(ws.name);
-      return sheetKey === req || sheetKey.includes(req) || req.includes(sheetKey);
+
+      return (
+        sheetKey === req ||
+        sheetKey.includes(req) ||
+        req.includes(sheetKey)
+      );
     });
 
     if (fuzzy) return fuzzy;
@@ -134,7 +156,10 @@ function buildAliases(columns = []) {
 
   const add = (alias, key) => {
     const n = compactKey(alias);
-    if (n && !aliases.has(n)) aliases.set(n, key);
+
+    if (n && !aliases.has(n)) {
+      aliases.set(n, key);
+    }
   };
 
   columns.forEach((col) => {
@@ -177,11 +202,11 @@ function buildAliases(columns = []) {
 
     inwardqty: "inwardQty",
     inward: "inwardQty",
-    qtyreceived: "inwardQty",
+    qtyreceived: "qtyReceived",
 
     issuedqty: "issuedQty",
     issued: "issuedQty",
-    qtyissued: "issuedQty",
+    qtyissued: "qtyIssued",
 
     balanceqty: "balanceQty",
     balance: "balanceQty",
@@ -191,20 +216,22 @@ function buildAliases(columns = []) {
     rate: "unitPrice",
 
     totalvalue: "totalValue",
-    total: "totalValue",
-    amount: "totalValue",
+    total: "total",
+    amount: "total",
 
     location: "location",
     rack: "location",
     rackno: "location",
 
     deliverydate: "deliveryDate",
-    date: "Date",
+    date: "date",
     qty: "Qty",
+    quantity: "Qty",
 
     vendor: "vendorSupplier",
+    supplier: "vendorSupplier",
     vendorsupplier: "vendorSupplier",
-    suppliervendor: "Supplier / Vendor",
+    suppliervendor: "vendorSupplier",
 
     department: "department",
     receivedby: "receivedBy",
@@ -277,14 +304,17 @@ function headerScore(row = [], columns = []) {
 
   for (const cell of row) {
     const text = cleanText(cell);
+
     if (!text) continue;
 
     filled += 1;
 
-    if (aliases.has(compactKey(text))) score += 8;
+    if (aliases.has(compactKey(text))) {
+      score += 8;
+    }
 
     if (
-      /date|month|qty|description|purpose|vendor|fuel|distance|uom|sr|code|price|balance|issued|inward/i.test(
+      /date|month|qty|quantity|description|purpose|vendor|supplier|fuel|distance|uom|sr|code|price|balance|issued|inward/i.test(
         text
       )
     ) {
@@ -292,11 +322,18 @@ function headerScore(row = [], columns = []) {
     }
   }
 
-  return { score, filled };
+  return {
+    score,
+    filled,
+  };
 }
 
 function findHeaderRow(rows = [], columns = []) {
-  let best = { rowIndex: 0, score: -1, filled: 0 };
+  let best = {
+    rowIndex: 0,
+    score: -1,
+    filled: 0,
+  };
 
   const maxScan = Math.min(rows.length || 60, 80);
 
@@ -307,11 +344,43 @@ function findHeaderRow(rows = [], columns = []) {
       current.score > best.score ||
       (current.score === best.score && current.filled > best.filled)
     ) {
-      best = { rowIndex: i, ...current };
+      best = {
+        rowIndex: i,
+        ...current,
+      };
     }
   }
 
   return best.rowIndex;
+}
+
+function isRepeatedHeaderRow(data, columns = []) {
+  if (!columns.length) return false;
+
+  let matched = 0;
+
+  for (const col of columns) {
+    const value = data[col.key];
+    const expected = col.label || col.key;
+
+    if (compactKey(value) && compactKey(value) === compactKey(expected)) {
+      matched += 1;
+    }
+  }
+
+  return matched >= 2;
+}
+
+function isMergedTitleRow(values = []) {
+  const usefulValues = values.filter((v) => cleanText(v) !== "");
+
+  if (usefulValues.length <= 2) return false;
+
+  const uniqueUseful = Array.from(
+    new Set(usefulValues.map((v) => compactKey(v)))
+  ).filter(Boolean);
+
+  return uniqueUseful.length === 1;
 }
 
 function mapExcelRows(ws, columns = [], opts = {}) {
@@ -373,48 +442,56 @@ function mapExcelRows(ws, columns = [], opts = {}) {
     colMap.forEach(({ index, key }) => {
       const value = dateValue(row[index]);
 
-      if (value !== "") filled += 1;
+      if (cleanText(value) !== "") {
+        filled += 1;
+      }
 
       data[key] = value;
     });
 
     if (!filled) {
       emptyRun += 1;
-      if (emptyRun > 40) break;
+
+      if (emptyRun > 80) {
+        break;
+      }
+
       continue;
     }
 
     emptyRun = 0;
 
-    const isRepeatedHeader =
-      columns.length &&
-      columns.some(
-        (col) => compactKey(data[col.key]) === compactKey(col.label || col.key)
-      );
-
     const configuredValues = !columns.length
       ? Object.values(data)
       : columns.map((col) => data[col.key]);
 
-    const usefulValues = configuredValues.filter(
-      (v) =>
-        v !== undefined &&
-        v !== "" &&
-        !columns.some(
-          (col) => compactKey(v) === compactKey(col.label || col.key)
-        )
-    );
+    const usefulValues = configuredValues.filter((value) => {
+      const text = cleanText(value);
 
-    const uniqueUseful = Array.from(
-      new Set(usefulValues.map((v) => compactKey(v)))
-    ).filter(Boolean);
+      if (!text) return false;
 
-    const isMergedTitleRow =
-      usefulValues.length > 2 && uniqueUseful.length === 1;
+      const sameAsHeader = columns.some(
+        (col) => compactKey(text) === compactKey(col.label || col.key)
+      );
 
-    const hasUsefulConfiguredData = !columns.length || usefulValues.length >= 2;
+      return !sameAsHeader;
+    });
 
-    if (!isRepeatedHeader && !isMergedTitleRow && hasUsefulConfiguredData) {
+    /*
+      IMPORTANT:
+      Pehle code usefulValues.length >= 2 demand kar raha tha.
+      Is wajah se kuch filled rows skip ho rahi thin.
+      Ab agar row me 1 bhi useful filled cell hai to row read hogi.
+    */
+
+    const hasUsefulConfiguredData = !columns.length || usefulValues.length >= 1;
+
+    if (
+      !isRepeatedHeaderRow(data, columns) &&
+      !isMergedTitleRow(configuredValues) &&
+      hasUsefulConfiguredData
+    ) {
+      data.__rowNumber = r + 1;
       mappedRows.push(data);
     }
   }
@@ -423,13 +500,19 @@ function mapExcelRows(ws, columns = [], opts = {}) {
 }
 
 function normalizeMonthlyTravel(row) {
-  const out = { ...row };
+  const out = {
+    ...row,
+  };
 
   const date = out.Date || out.date || out.deliveryDate || "";
 
-  if (date) out.Date = dateValue(date);
+  if (date) {
+    out.Date = dateValue(date);
+  }
 
-  if (!out.Month) out.Month = monthNameFromDate(out.Date);
+  if (!out.Month) {
+    out.Month = monthNameFromDate(out.Date);
+  }
 
   const going = toNumber(
     out["Going Dist.(KM)"] ?? out.goingDistance ?? out.goingDist
