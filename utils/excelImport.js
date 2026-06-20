@@ -1,4 +1,4 @@
-const ExcelJS = require("exceljs");
+const XLSX = require("xlsx");
 
 function cleanText(value) {
   if (value === null || value === undefined) return "";
@@ -9,15 +9,10 @@ function cleanText(value) {
 
   if (typeof value === "object") {
     if (value.text) return String(value.text).trim();
-
-    if (value.result !== undefined) {
-      return cleanText(value.result);
-    }
-
+    if (value.result !== undefined) return cleanText(value.result);
     if (Array.isArray(value.richText)) {
       return value.richText.map((x) => x.text || "").join("").trim();
     }
-
     if (value.formula || value.sharedFormula) {
       return cleanText(value.result ?? "");
     }
@@ -41,30 +36,21 @@ function compactKey(value) {
 
 function toNumber(value) {
   if (value === null || value === undefined || value === "") return 0;
-
   const n = Number(String(value).replace(/,/g, "").trim());
-
   return Number.isFinite(n) ? n : 0;
 }
 
 function monthNameFromDate(value) {
   if (!value) return "";
-
   const d = value instanceof Date ? value : new Date(value);
-
   if (Number.isNaN(d.getTime())) return "";
-
-  return d.toLocaleString("en-US", {
-    month: "long",
-    year: "numeric",
-  });
+  return d.toLocaleString("en-US", { month: "long", year: "numeric" });
 }
 
 function dateValue(value) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
     return value.toISOString().slice(0, 10);
   }
-
   return cleanText(value);
 }
 
@@ -73,19 +59,50 @@ async function workbookFromBuffer(buffer) {
     throw new Error("Excel file buffer is missing");
   }
 
-  const wb = new ExcelJS.Workbook();
+  const raw = XLSX.read(buffer, {
+    type: "buffer",
+    cellDates: true,
+    cellNF: false,
+    cellText: false,
+  });
 
-  await wb.xlsx.load(buffer);
+  const sheetNames = Array.isArray(raw.SheetNames) ? raw.SheetNames : [];
 
-  return wb;
+  const worksheets = sheetNames.map((name) => {
+    const sheet = raw.Sheets[name];
+
+    const rows = XLSX.utils.sheet_to_json(sheet, {
+      header: 1,
+      defval: "",
+      raw: true,
+      blankrows: false,
+    });
+
+    return {
+      name,
+      rows,
+      rowCount: rows.length,
+      columnCount: rows.reduce((max, row) => Math.max(max, row.length), 0),
+    };
+  });
+
+  return {
+    raw,
+    SheetNames: sheetNames,
+    worksheets,
+    getWorksheet(name) {
+      const requested = compactKey(name);
+      return (
+        worksheets.find((ws) => compactKey(ws.name) === requested) || null
+      );
+    },
+  };
 }
 
 function selectWorksheet(wb, requestedSheet) {
   const worksheets = Array.isArray(wb?.worksheets) ? wb.worksheets : [];
 
-  if (!worksheets.length) {
-    return null;
-  }
+  if (!worksheets.length) return null;
 
   if (requestedSheet) {
     const exact =
@@ -99,12 +116,7 @@ function selectWorksheet(wb, requestedSheet) {
 
     const fuzzy = worksheets.find((ws) => {
       const sheetKey = compactKey(ws.name);
-
-      return (
-        sheetKey === req ||
-        sheetKey.includes(req) ||
-        req.includes(sheetKey)
-      );
+      return sheetKey === req || sheetKey.includes(req) || req.includes(sheetKey);
     });
 
     if (fuzzy) return fuzzy;
@@ -117,23 +129,12 @@ function selectWorksheet(wb, requestedSheet) {
   );
 }
 
-function rowCellText(row, idx) {
-  const cell = row.getCell(idx);
-
-  if (!cell) return "";
-
-  return cleanText(cell.value);
-}
-
 function buildAliases(columns = []) {
   const aliases = new Map();
 
   const add = (alias, key) => {
     const n = compactKey(alias);
-
-    if (n && !aliases.has(n)) {
-      aliases.set(n, key);
-    }
+    if (n && !aliases.has(n)) aliases.set(n, key);
   };
 
   columns.forEach((col) => {
@@ -146,9 +147,7 @@ function buildAliases(columns = []) {
     srno: "srNo",
     sn: "srNo",
     sno: "srNo",
-    "sno.": "srNo",
     serialno: "srNo",
-    serialnumber: "srNo",
 
     itemcode: "itemCode",
     code: "itemCode",
@@ -270,15 +269,14 @@ function buildAliases(columns = []) {
   return aliases;
 }
 
-function headerScore(row, columns = []) {
+function headerScore(row = [], columns = []) {
   const aliases = buildAliases(columns);
 
   let score = 0;
   let filled = 0;
 
-  for (let c = 1; c <= Math.max(row.cellCount || 0, 1); c += 1) {
-    const text = rowCellText(row, c);
-
+  for (const cell of row) {
+    const text = cleanText(cell);
     if (!text) continue;
 
     filled += 1;
@@ -297,98 +295,58 @@ function headerScore(row, columns = []) {
   return { score, filled };
 }
 
-function findHeaderRow(ws, columns = []) {
-  let best = {
-    rowNumber: 1,
-    score: -1,
-    filled: 0,
-  };
+function findHeaderRow(rows = [], columns = []) {
+  let best = { rowIndex: 0, score: -1, filled: 0 };
 
-  const maxScan = Math.min(ws.rowCount || 60, 80);
+  const maxScan = Math.min(rows.length || 60, 80);
 
-  for (let r = 1; r <= maxScan; r += 1) {
-    const row = ws.getRow(r);
-    const current = headerScore(row, columns);
+  for (let i = 0; i < maxScan; i += 1) {
+    const current = headerScore(rows[i] || [], columns);
 
     if (
       current.score > best.score ||
       (current.score === best.score && current.filled > best.filled)
     ) {
-      best = {
-        rowNumber: r,
-        ...current,
-      };
+      best = { rowIndex: i, ...current };
     }
   }
 
-  return best.rowNumber;
-}
-
-function rawCellValue(cell) {
-  if (!cell) return "";
-
-  const value = cell.value;
-
-  if (value instanceof Date) {
-    return dateValue(value);
-  }
-
-  if (typeof value === "object" && value?.result !== undefined) {
-    return dateValue(value.result);
-  }
-
-  if (typeof value === "object" && (value?.formula || value?.sharedFormula)) {
-    return dateValue(value.result ?? "");
-  }
-
-  return dateValue(value);
+  return best.rowIndex;
 }
 
 function mapExcelRows(ws, columns = [], opts = {}) {
   if (!ws) return [];
 
-  const headerRowNo = opts.headerRow || findHeaderRow(ws, columns);
-  const headerRow = ws.getRow(headerRowNo);
+  const rowsArray = Array.isArray(ws.rows) ? ws.rows : [];
+
+  if (!rowsArray.length) return [];
+
+  const headerIndex =
+    typeof opts.headerRow === "number"
+      ? Math.max(opts.headerRow - 1, 0)
+      : findHeaderRow(rowsArray, columns);
+
+  const headerRow = rowsArray[headerIndex] || [];
 
   const aliases = buildAliases(columns);
   const fallbackColumns = columns.map((c) => c.key || c.label).filter(Boolean);
 
-  const colMap = [];
   const maxCol = Math.max(
-    headerRow.cellCount || 0,
+    headerRow.length,
     ws.columnCount || 0,
     fallbackColumns.length
   );
 
-  const duplicateCounter = new Map();
+  const colMap = [];
 
-  for (let c = 1; c <= maxCol; c += 1) {
-    const headerText = rowCellText(headerRow, c);
+  for (let c = 0; c < maxCol; c += 1) {
+    const headerText = cleanText(headerRow[c]);
     const headerCompact = compactKey(headerText);
 
     let key = aliases.get(headerCompact);
 
-    const configuredMatches = columns
-      .map((col) => ({
-        key: col.key,
-        label: col.label || col.key,
-      }))
-      .filter(
-        (col) =>
-          compactKey(col.label) === headerCompact ||
-          compactKey(col.key) === headerCompact
-      );
-
-    if (configuredMatches.length > 1) {
-      const used = duplicateCounter.get(headerCompact) || 0;
-
-      key = configuredMatches[Math.min(used, configuredMatches.length - 1)].key;
-
-      duplicateCounter.set(headerCompact, used + 1);
-    }
-
-    if (!key && fallbackColumns[c - 1]) {
-      key = fallbackColumns[c - 1];
+    if (!key && fallbackColumns[c]) {
+      key = fallbackColumns[c];
     }
 
     if (!key && headerText) {
@@ -398,22 +356,22 @@ function mapExcelRows(ws, columns = [], opts = {}) {
     if (!key) continue;
 
     colMap.push({
-      idx: c,
+      index: c,
       key,
     });
   }
 
-  const rows = [];
+  const mappedRows = [];
   let emptyRun = 0;
 
-  for (let r = headerRowNo + 1; r <= (ws.rowCount || 0); r += 1) {
-    const row = ws.getRow(r);
+  for (let r = headerIndex + 1; r < rowsArray.length; r += 1) {
+    const row = rowsArray[r] || [];
     const data = {};
 
     let filled = 0;
 
-    colMap.forEach(({ idx, key }) => {
-      const value = rawCellValue(row.getCell(idx));
+    colMap.forEach(({ index, key }) => {
+      const value = dateValue(row[index]);
 
       if (value !== "") filled += 1;
 
@@ -422,9 +380,7 @@ function mapExcelRows(ws, columns = [], opts = {}) {
 
     if (!filled) {
       emptyRun += 1;
-
       if (emptyRun > 40) break;
-
       continue;
     }
 
@@ -449,24 +405,21 @@ function mapExcelRows(ws, columns = [], opts = {}) {
         )
     );
 
-    const configuredFilledCount = usefulValues.length;
-
     const uniqueUseful = Array.from(
       new Set(usefulValues.map((v) => compactKey(v)))
     ).filter(Boolean);
 
     const isMergedTitleRow =
-      configuredFilledCount > 2 && uniqueUseful.length === 1;
+      usefulValues.length > 2 && uniqueUseful.length === 1;
 
-    const hasUsefulConfiguredData =
-      !columns.length || configuredFilledCount >= 2;
+    const hasUsefulConfiguredData = !columns.length || usefulValues.length >= 2;
 
     if (!isRepeatedHeader && !isMergedTitleRow && hasUsefulConfiguredData) {
-      rows.push(data);
+      mappedRows.push(data);
     }
   }
 
-  return rows;
+  return mappedRows;
 }
 
 function normalizeMonthlyTravel(row) {
@@ -474,13 +427,9 @@ function normalizeMonthlyTravel(row) {
 
   const date = out.Date || out.date || out.deliveryDate || "";
 
-  if (date) {
-    out.Date = dateValue(date);
-  }
+  if (date) out.Date = dateValue(date);
 
-  if (!out.Month) {
-    out.Month = monthNameFromDate(out.Date);
-  }
+  if (!out.Month) out.Month = monthNameFromDate(out.Date);
 
   const going = toNumber(
     out["Going Dist.(KM)"] ?? out.goingDistance ?? out.goingDist
