@@ -58,88 +58,122 @@ const issueColumns = [
 ];
 
 function categoryValue(value) {
+  const txt = cleanText(value);
+
   const found = categories.find(
-    (category) => category.toLowerCase() === cleanText(value).toLowerCase()
+    (category) => category.toLowerCase() === txt.toLowerCase()
   );
 
   return found || "Inventory";
 }
 
 function parseDate(value) {
-  const txt = cleanText(value);
+  if (!value) return undefined;
 
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value;
+  }
+
+  const txt = cleanText(value);
   if (!txt) return undefined;
 
   const d = new Date(txt);
-
   return Number.isNaN(d.getTime()) ? undefined : d;
+}
+
+function pick(row, keys) {
+  for (const key of keys) {
+    const value = row?.[key];
+
+    if (value !== undefined && value !== null && cleanText(value) !== "") {
+      return value;
+    }
+  }
+
+  return "";
 }
 
 function rowToTransaction(row, type) {
   const isInward = type === "inward";
 
   const payload = {
-    srNo: toNumber(row.srNo || row["Sr"] || row["SR #"]),
-    itemCode: cleanText(row.itemCode || row["Item Code"] || row.Code),
-    itemDescription: cleanText(
-      row.itemDescription || row["Item Description"] || row.Description
+    srNo: toNumber(pick(row, ["srNo", "Sr", "SR #", "S No", "S.No"])),
+    itemCode: cleanText(
+      pick(row, ["itemCode", "Item Code", "ITEM CODE", "Code", "Item No"])
     ),
-    category: categoryValue(row.category || row.Category),
-    uom: cleanText(row.uom || row.UOM),
-    department: cleanText(row.department || row.Department),
-    unitPrice: toNumber(row.unitPrice || row["Unit Price"] || row.Rate),
-    total: toNumber(row.total || row.Total),
+    itemDescription: cleanText(
+      pick(row, [
+        "itemDescription",
+        "Item Description",
+        "ITEM DESCRIPTION",
+        "Description",
+        "Item Name",
+      ])
+    ),
+    category: categoryValue(pick(row, ["category", "Category"])),
+    uom: cleanText(pick(row, ["uom", "UOM", "Unit", "Units"])),
+    department: cleanText(pick(row, ["department", "Department"])),
+    unitPrice: toNumber(pick(row, ["unitPrice", "Unit Price", "Rate", "Price"])),
+    total: toNumber(pick(row, ["total", "Total", "Amount"])),
   };
 
   if (isInward) {
-    payload.deliveryDate = parseDate(
-      row.deliveryDate || row["Delivery Date"] || row.Date
-    );
+    payload.deliveryDate =
+      parseDate(pick(row, ["deliveryDate", "Delivery Date", "Date", "date"])) ||
+      new Date();
 
     payload.qtyReceived = toNumber(
-      row.qtyReceived || row["Qty Received"] || row.Qty || row.Quantity
+      pick(row, ["qtyReceived", "Qty Received", "Qty", "Quantity", "inwardQty"])
     );
 
-    payload.openQty = toNumber(row.openQty || row["Open Qty"]);
+    payload.openQty = toNumber(pick(row, ["openQty", "Open Qty", "Balance Qty"]));
 
     payload.vendorSupplier = cleanText(
-      row.vendorSupplier ||
-        row["Vendor/Supplier"] ||
-        row.Vendor ||
-        row.Supplier
+      pick(row, [
+        "vendorSupplier",
+        "Vendor/Supplier",
+        "Vendor",
+        "Supplier",
+        "Supplier / Vendor",
+      ])
     );
 
-    payload.receivedBy = cleanText(row.receivedBy || row["Received By"]);
+    payload.receivedBy = cleanText(pick(row, ["receivedBy", "Received By"]));
 
     payload.grnStatusWithDate = cleanText(
-      row.grnStatusWithDate || row["GRN Status with Date"] || row.Status
+      pick(row, ["grnStatusWithDate", "GRN Status with Date", "Status"])
     );
   } else {
-    payload.date = parseDate(row.date || row.Date);
+    payload.date =
+      parseDate(pick(row, ["date", "Date", "ISSUE DATE", "issueDate"])) ||
+      new Date();
 
     payload.qtyIssued = toNumber(
-      row.qtyIssued || row["Qty Issued"] || row.Qty || row.Quantity
+      pick(row, ["qtyIssued", "Qty Issued", "Qty", "Quantity", "issuedQty"])
     );
 
-    payload.balanceQty = toNumber(row.balanceQty || row["Balance Qty"]);
+    payload.balanceQty = toNumber(
+      pick(row, ["balanceQty", "Balance Qty", "Balance"])
+    );
 
     payload.equipmentName = cleanText(
-      row.equipmentName || row["Equipment Name"]
+      pick(row, ["equipmentName", "Equipment Name"])
     );
 
     payload.subEquipmentName = cleanText(
-      row.subEquipmentName || row["Sub Equipment Name"]
+      pick(row, ["subEquipmentName", "Sub Equipment Name"])
     );
 
-    payload.issuedTo = cleanText(row.issuedTo || row["Issued To"]);
-
-    payload.shift = cleanText(row.shift || row.Shift);
+    payload.issuedTo = cleanText(pick(row, ["issuedTo", "Issued To"]));
+    payload.shift = cleanText(pick(row, ["shift", "Shift"]));
   }
 
   return payload;
 }
 
-function normalizeFallbackPayload(row, type) {
+function fallbackPayload(row, type) {
+  const isInward = type === "inward";
+
   const payload = {
     ...row,
     type,
@@ -152,43 +186,41 @@ function normalizeFallbackPayload(row, type) {
     total: Number(row.total || 0),
   };
 
-  if (type === "inward") {
+  if (isInward) {
     payload.deliveryDate = row.deliveryDate || new Date();
     payload.qtyReceived = Number(row.qtyReceived || 0);
     payload.openQty = Number(row.openQty || 0);
+    payload.vendorSupplier = cleanText(row.vendorSupplier);
+    payload.receivedBy = cleanText(row.receivedBy);
+    payload.grnStatusWithDate = cleanText(row.grnStatusWithDate);
 
     if (!payload.total) {
       payload.total = payload.qtyReceived * payload.unitPrice;
     }
-
-    payload.vendorSupplier = cleanText(row.vendorSupplier);
-    payload.receivedBy = cleanText(row.receivedBy);
-    payload.grnStatusWithDate = cleanText(row.grnStatusWithDate);
   } else {
     payload.date = row.date || new Date();
     payload.qtyIssued = Number(row.qtyIssued || 0);
     payload.balanceQty = Number(row.balanceQty || 0);
-
-    if (!payload.total) {
-      payload.total = payload.qtyIssued * payload.unitPrice;
-    }
-
     payload.equipmentName = cleanText(row.equipmentName);
     payload.subEquipmentName = cleanText(row.subEquipmentName);
     payload.issuedTo = cleanText(row.issuedTo);
     payload.shift = cleanText(row.shift);
+
+    if (!payload.total) {
+      payload.total = payload.qtyIssued * payload.unitPrice;
+    }
   }
 
   return payload;
 }
 
-async function buildImportPayload(row, type) {
+async function buildPayload(row, type) {
   try {
     const payload = await applyTransactionPayload(row, type);
     payload.type = type;
     return payload;
   } catch (err) {
-    const payload = normalizeFallbackPayload(row, type);
+    const payload = fallbackPayload(row, type);
     payload._lookupWarning = err.message;
     return payload;
   }
@@ -200,7 +232,7 @@ async function safeRecalcStock(itemCode, category) {
       await recalcStock(itemCode, category);
     }
   } catch (err) {
-    console.warn(`Stock recalc skipped for ${itemCode}:`, err.message);
+    console.warn(`Stock recalc skipped for ${itemCode}: ${err.message}`);
   }
 }
 
@@ -227,7 +259,6 @@ exports.getTransactions = async (req, res, next) => {
     }
 
     const rows = await Transaction.find(filter).sort({ createdAt: -1 });
-
     res.json(rows);
   } catch (e) {
     next(e);
@@ -243,8 +274,7 @@ exports.createTransaction = async (req, res, next) => {
 
     const row = await Transaction.create(payload);
 
-    await recalcStock(row.itemCode, row.category);
-
+    await safeRecalcStock(row.itemCode, row.category);
     await audit(req, "CREATE", type.toUpperCase(), row.toObject());
 
     res.status(201).json(row);
@@ -279,8 +309,8 @@ exports.updateTransaction = async (req, res, next) => {
       runValidators: true,
     });
 
-    await recalcStock(old.itemCode, old.category);
-    await recalcStock(row.itemCode, row.category);
+    await safeRecalcStock(old.itemCode, old.category);
+    await safeRecalcStock(row.itemCode, row.category);
 
     await audit(req, "UPDATE", type.toUpperCase(), {
       id: req.params.id,
@@ -302,8 +332,7 @@ exports.deleteTransaction = async (req, res, next) => {
       });
     }
 
-    await recalcStock(row.itemCode, row.category);
-
+    await safeRecalcStock(row.itemCode, row.category);
     await audit(req, "DELETE", row.type.toUpperCase(), row.toObject());
 
     res.json({
@@ -372,12 +401,12 @@ exports.importTransactions = async (req, res, next) => {
       });
     }
 
-    const mappedRows = mapExcelRows(
+    const rawRows = mapExcelRows(
       ws,
       type === "inward" ? inwardColumns : issueColumns
     );
 
-    const rows = mappedRows
+    const rows = rawRows
       .map((row) => rowToTransaction(row, type))
       .filter((row) => cleanText(row.itemCode));
 
@@ -391,9 +420,18 @@ exports.importTransactions = async (req, res, next) => {
     let lookupWarnings = 0;
     const failed = [];
 
+    /*
+      Inward / Issuance import rule:
+      - Duplicate skip nahi hoga
+      - Same itemCode multiple times allowed hai
+      - Jis row me itemCode hai wo post hogi
+      - Stock lookup fail ho to fallback payload se row post hogi
+      - Stock recalc fail ho to import stop nahi hoga
+    */
+
     for (const row of rows) {
       try {
-        const payload = await buildImportPayload(row, type);
+        const payload = await buildPayload(row, type);
 
         if (payload._lookupWarning) {
           lookupWarnings += 1;
@@ -430,21 +468,21 @@ exports.importTransactions = async (req, res, next) => {
         imported,
         failed: failed.length,
         lookupWarnings,
-        failedRows: failed.slice(0, 20),
+        failedRows: failed.slice(0, 50),
       });
     }
 
     res.status(201).json({
       message: `${
         type === "inward" ? "Inward" : "Issuance"
-      } import completed. Total ${rows.length}, imported ${imported}${
+      } import completed. Total valid ${rows.length}, imported ${imported}${
         failed.length ? `, failed ${failed.length}` : ""
       }${lookupWarnings ? `, lookup warnings ${lookupWarnings}` : ""}.`,
       totalRows: rows.length,
       imported,
       failed: failed.length,
       lookupWarnings,
-      failedRows: failed.slice(0, 20),
+      failedRows: failed.slice(0, 50),
     });
   } catch (e) {
     next(e);
