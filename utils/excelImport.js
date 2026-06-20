@@ -9,7 +9,10 @@ function cleanText(value) {
 
   if (typeof value === "object") {
     if (value.text) return String(value.text).trim();
-    if (value.result !== undefined) return cleanText(value.result);
+
+    if (value.result !== undefined) {
+      return cleanText(value.result);
+    }
 
     if (Array.isArray(value.richText)) {
       return value.richText.map((x) => x.text || "").join("").trim();
@@ -97,7 +100,10 @@ async function workbookFromBuffer(buffer) {
       name,
       rows,
       rowCount: rows.length,
-      columnCount: rows.reduce((max, row) => Math.max(max, row.length), 0),
+      columnCount: rows.reduce(
+        (max, row) => Math.max(max, Array.isArray(row) ? row.length : 0),
+        0
+      ),
     };
   });
 
@@ -157,7 +163,7 @@ function buildAliases(columns = []) {
   const add = (alias, key) => {
     const n = compactKey(alias);
 
-    if (n && !aliases.has(n)) {
+    if (n && key && !aliases.has(n)) {
       aliases.set(n, key);
     }
   };
@@ -225,6 +231,8 @@ function buildAliases(columns = []) {
 
     deliverydate: "deliveryDate",
     date: "date",
+    issuedate: "date",
+
     qty: "Qty",
     quantity: "Qty",
 
@@ -284,7 +292,6 @@ function buildAliases(columns = []) {
     totalpricers: "Total Price (Rs.)",
 
     toolitemname: "TOOL / ITEM NAME",
-    issuedate: "ISSUE DATE",
     replacement: "REPLACEMENT",
     remarkscondition: "REMARKS / CONDITION",
   };
@@ -383,6 +390,10 @@ function isMergedTitleRow(values = []) {
   return uniqueUseful.length === 1;
 }
 
+function rowHasAnyFilledCell(row = []) {
+  return row.some((value) => cleanText(value) !== "");
+}
+
 function mapExcelRows(ws, columns = [], opts = {}) {
   if (!ws) return [];
 
@@ -437,22 +448,24 @@ function mapExcelRows(ws, columns = [], opts = {}) {
     const row = rowsArray[r] || [];
     const data = {};
 
-    let filled = 0;
+    const rawRowFilled = rowHasAnyFilledCell(row);
+
+    let configuredFilled = 0;
 
     colMap.forEach(({ index, key }) => {
       const value = dateValue(row[index]);
 
       if (cleanText(value) !== "") {
-        filled += 1;
+        configuredFilled += 1;
       }
 
       data[key] = value;
     });
 
-    if (!filled) {
+    if (!rawRowFilled && !configuredFilled) {
       emptyRun += 1;
 
-      if (emptyRun > 80) {
+      if (emptyRun > 120) {
         break;
       }
 
@@ -477,14 +490,8 @@ function mapExcelRows(ws, columns = [], opts = {}) {
       return !sameAsHeader;
     });
 
-    /*
-      IMPORTANT:
-      Pehle code usefulValues.length >= 2 demand kar raha tha.
-      Is wajah se kuch filled rows skip ho rahi thin.
-      Ab agar row me 1 bhi useful filled cell hai to row read hogi.
-    */
-
-    const hasUsefulConfiguredData = !columns.length || usefulValues.length >= 1;
+    const hasUsefulConfiguredData =
+      !columns.length || usefulValues.length >= 1 || rawRowFilled;
 
     if (
       !isRepeatedHeaderRow(data, columns) &&
