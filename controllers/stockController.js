@@ -415,35 +415,56 @@ exports.importStock = async (req, res, next) => {
     }
 
     let imported = 0;
+    let skipped = 0;
+    let duplicateInFile = 0;
+
+    const seenInFile = new Set();
 
     for (const row of rows) {
-      await StockItem.findOneAndUpdate(
-        {
-          itemCode: row.itemCode,
-          category,
-        },
-        {
-          $set: row,
-        },
-        {
-          upsert: true,
-          new: true,
-          runValidators: true,
-          setDefaultsOnInsert: true,
-        }
-      );
+      const itemCode = cleanText(row.itemCode);
+      const key = `${category.toLowerCase()}::${itemCode.toLowerCase()}`;
+
+      if (seenInFile.has(key)) {
+        duplicateInFile += 1;
+        skipped += 1;
+        continue;
+      }
+
+      seenInFile.add(key);
+
+      const exists = await StockItem.exists({
+        category,
+        itemCode: new RegExp(`^${escapeRegex(itemCode)}$`, "i"),
+      });
+
+      if (exists) {
+        skipped += 1;
+        continue;
+      }
+
+      await StockItem.create({
+        ...row,
+        itemCode,
+        category,
+      });
 
       imported += 1;
     }
 
     await audit(req, "IMPORT", "STOCK", {
       category,
+      totalRows: rows.length,
       imported,
+      skipped,
+      duplicateInFile,
     });
 
     res.status(201).json({
-      message: "Stock imported successfully",
+      message: `Stock import completed. Imported ${imported}, skipped ${skipped} already existing/duplicate rows.`,
+      totalRows: rows.length,
       imported,
+      skipped,
+      duplicateInFile,
     });
   } catch (e) {
     console.error("Stock import failed:", e);
