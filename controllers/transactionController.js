@@ -93,6 +93,14 @@ function pick(row, keys) {
   return "";
 }
 
+function stripLookupWarning(payload) {
+  if (payload?._lookupWarning) {
+    delete payload._lookupWarning;
+  }
+
+  return payload;
+}
+
 function rowToTransaction(row, type) {
   const isInward = type === "inward";
 
@@ -126,7 +134,9 @@ function rowToTransaction(row, type) {
       pick(row, ["qtyReceived", "Qty Received", "Qty", "Quantity", "inwardQty"])
     );
 
-    payload.openQty = toNumber(pick(row, ["openQty", "Open Qty", "Balance Qty"]));
+    payload.openQty = toNumber(
+      pick(row, ["openQty", "Open Qty", "Balance Qty"])
+    );
 
     payload.vendorSupplier = cleanText(
       pick(row, [
@@ -269,8 +279,8 @@ exports.createTransaction = async (req, res, next) => {
   try {
     const type = txType(req.params.type);
 
-    const payload = await applyTransactionPayload({ ...req.body }, type);
-    payload.type = type;
+    const payload = await buildPayload({ ...req.body }, type);
+    stripLookupWarning(payload);
 
     const row = await Transaction.create(payload);
 
@@ -295,14 +305,15 @@ exports.updateTransaction = async (req, res, next) => {
 
     const type = old.type;
 
-    const payload = await applyTransactionPayload(
+    const payload = await buildPayload(
       {
         ...old.toObject(),
         ...req.body,
       },
-      type,
-      old
+      type
     );
+
+    stripLookupWarning(payload);
 
     const row = await Transaction.findByIdAndUpdate(req.params.id, payload, {
       new: true,
@@ -419,15 +430,6 @@ exports.importTransactions = async (req, res, next) => {
     let imported = 0;
     let lookupWarnings = 0;
     const failed = [];
-
-    /*
-      Inward / Issuance import rule:
-      - Duplicate skip nahi hoga
-      - Same itemCode multiple times allowed hai
-      - Jis row me itemCode hai wo post hogi
-      - Stock lookup fail ho to fallback payload se row post hogi
-      - Stock recalc fail ho to import stop nahi hoga
-    */
 
     for (const row of rows) {
       try {
