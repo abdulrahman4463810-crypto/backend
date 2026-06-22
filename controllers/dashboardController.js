@@ -53,6 +53,15 @@ function emptyCategoryValues() {
   };
 }
 
+function emptyMachineValues() {
+  return {
+    inventory: 0,
+    nonInventory: 0,
+    services: 0,
+    pattyCash: 0,
+  };
+}
+
 function getCategoryCssKey(category) {
   const c = normalizeCategory(category);
 
@@ -63,41 +72,29 @@ function getCategoryCssKey(category) {
   return "inventory";
 }
 
-function emptyMachineValues() {
-  return {
-    inventory: 0,
-    nonInventory: 0,
-    services: 0,
-    pattyCash: 0,
-  };
+function isInwardType(type) {
+  const t = norm(type);
+  return t === "inward" || t.includes("inward");
 }
 
-function isEquipmentGroup(group) {
-  const g = norm(group);
-
-  return (
-    g.includes("machine") ||
-    g.includes("equipment") ||
-    g.includes("equip") ||
-    g.includes("machine name") ||
-    g.includes("equipment name")
-  );
+function isIssuanceType(type) {
+  const t = norm(type);
+  return t === "issuance" || t.includes("issue") || t.includes("issuance");
 }
 
-function getTxDate(row) {
+function getAnyDate(row) {
   const value =
     row.date ||
     row.issueDate ||
     row.issuanceDate ||
     row.deliveryDate ||
+    row.receivedDate ||
     row.createdAt ||
     row.updatedAt;
 
   const d = new Date(value);
 
   if (Number.isNaN(d.getTime())) return null;
-  if (d < new Date("2026-05-01")) return null;
-  if (d >= new Date("2027-01-01")) return null;
 
   return d;
 }
@@ -105,7 +102,10 @@ function getTxDate(row) {
 function getMonthByDate(date) {
   if (!date) return null;
 
+  const year = date.getFullYear();
   const month = date.getMonth() + 1;
+
+  if (year !== 2026) return null;
 
   return MONTHS.find((m) => m.month === month) || null;
 }
@@ -122,7 +122,15 @@ function getRowTotal(row) {
   const directNum = n(direct);
   if (directNum) return directNum;
 
-  const qty = n(row.qtyIssued ?? row.issueQty ?? row.qty ?? row.quantity);
+  const qty = n(
+    row.qtyReceived ??
+      row.receivedQty ??
+      row.qtyIssued ??
+      row.issueQty ??
+      row.qty ??
+      row.quantity
+  );
+
   const price = n(row.unitPrice ?? row.price ?? row.rate);
 
   return qty * price;
@@ -149,6 +157,18 @@ function getRawEquipment(row) {
   );
 }
 
+function isEquipmentGroup(group) {
+  const g = norm(group);
+
+  return (
+    g.includes("machine") ||
+    g.includes("equipment") ||
+    g.includes("equip") ||
+    g.includes("machine name") ||
+    g.includes("equipment name")
+  );
+}
+
 async function buildEquipmentListAndMap() {
   const listRows = await ListItem.find().sort({
     group: 1,
@@ -170,7 +190,8 @@ async function buildEquipmentListAndMap() {
     groupCounter[group] = (groupCounter[group] || 0) + 1;
 
     const no = groupCounter[group];
-    const equipment = {
+
+    equipmentList.push({
       no,
       id: String(row._id),
       _id: String(row._id),
@@ -178,9 +199,7 @@ async function buildEquipmentListAndMap() {
       value,
       equipmentName: value,
       machineName: value,
-    };
-
-    equipmentList.push(equipment);
+    });
 
     equipmentMap[String(no)] = value;
     equipmentMap[norm(no)] = value;
@@ -230,40 +249,52 @@ exports.master = async (req, res, next) => {
       { $sort: { _id: 1 } },
     ]);
 
-    const inward = await Transaction.aggregate([
-      { $match: { type: "inward" } },
-      {
-        $group: {
-          _id: "$category",
-          total: { $sum: "$total" },
-          qty: { $sum: "$qtyReceived" },
-        },
-      },
-    ]);
+    const transactions = await Transaction.find({}).lean();
 
-    const issuance = await Transaction.aggregate([
-      { $match: { type: "issuance" } },
-      {
-        $group: {
-          _id: "$category",
-          total: { $sum: "$total" },
-          qty: { $sum: "$qtyIssued" },
-        },
-      },
-    ]);
-
-    const stockMap = Object.fromEntries(
-      stock.map((row) => [normalizeCategory(row._id), row])
-    );
-
-    const inwardMap = emptyCategoryValues();
-    inward.forEach((row) => {
-      inwardMap[normalizeCategory(row._id)] += n(row.total);
+    const stockMap = {};
+    stock.forEach((row) => {
+      stockMap[normalizeCategory(row._id)] = row;
     });
 
+    const inwardMap = emptyCategoryValues();
     const issuanceMap = emptyCategoryValues();
-    issuance.forEach((row) => {
-      issuanceMap[normalizeCategory(row._id)] += n(row.total);
+    const inwardQtyMap = emptyCategoryValues();
+    const issuanceQtyMap = emptyCategoryValues();
+
+    const inwardMonth = {};
+    const issuanceMonth = {};
+
+    MONTHS.forEach((month) => {
+      CATEGORIES.forEach((category) => {
+        inwardMonth[`${month.key}-${category}`] = 0;
+        issuanceMonth[`${month.key}-${category}`] = 0;
+      });
+    });
+
+    transactions.forEach((tx) => {
+      const type = cleanText(tx.type);
+      const category = normalizeCategory(tx.category);
+      const total = getRowTotal(tx);
+      const date = getAnyDate(tx);
+      const month = getMonthByDate(date);
+
+      if (isInwardType(type)) {
+        inwardMap[category] += total;
+        inwardQtyMap[category] += n(tx.qtyReceived ?? tx.receivedQty ?? tx.qty);
+
+        if (month) {
+          inwardMonth[`${month.key}-${category}`] += total;
+        }
+      }
+
+      if (isIssuanceType(type)) {
+        issuanceMap[category] += total;
+        issuanceQtyMap[category] += n(tx.qtyIssued ?? tx.issueQty ?? tx.qty);
+
+        if (month) {
+          issuanceMonth[`${month.key}-${category}`] += total;
+        }
+      }
     });
 
     const categorySummary = CATEGORIES.map((category) => {
@@ -276,6 +307,8 @@ exports.master = async (req, res, next) => {
         items: n(stockRow.items),
         balance: n(stockRow.balance),
         stockValue: money(stockRow.value),
+        inwardQty: money(inwardQtyMap[category]),
+        issuanceQty: money(issuanceQtyMap[category]),
         inwardValue: money(inwardMap[category]),
         issuanceValue: money(issuanceMap[category]),
         gap: money(gap),
@@ -284,28 +317,72 @@ exports.master = async (req, res, next) => {
       };
     });
 
-    const totalStockValue = categorySummary.reduce((s, r) => s + r.stockValue, 0);
-    const totalInwardValue = categorySummary.reduce((s, r) => s + r.inwardValue, 0);
-    const totalIssuanceValue = categorySummary.reduce((s, r) => s + r.issuanceValue, 0);
+    const monthly = MONTHS.map((month) => {
+      const inwardValues = {};
+      const issuanceValues = {};
+
+      CATEGORIES.forEach((category) => {
+        inwardValues[category] = money(inwardMonth[`${month.key}-${category}`]);
+        issuanceValues[category] = money(issuanceMonth[`${month.key}-${category}`]);
+      });
+
+      const inwardTotal = CATEGORIES.reduce(
+        (sum, category) => sum + n(inwardValues[category]),
+        0
+      );
+
+      const issuanceTotal = CATEGORIES.reduce(
+        (sum, category) => sum + n(issuanceValues[category]),
+        0
+      );
+
+      return {
+        ...month,
+        inwardValues,
+        issuanceValues,
+        inwardTotal: money(inwardTotal),
+        issuanceTotal: money(issuanceTotal),
+        gap: money(issuanceTotal - inwardTotal),
+      };
+    });
+
+    const totalStockValue = categorySummary.reduce(
+      (sum, row) => sum + n(row.stockValue),
+      0
+    );
+
+    const totalInwardValue = categorySummary.reduce(
+      (sum, row) => sum + n(row.inwardValue),
+      0
+    );
+
+    const totalIssuanceValue = categorySummary.reduce(
+      (sum, row) => sum + n(row.issuanceValue),
+      0
+    );
+
     const issuanceGap = totalIssuanceValue - totalInwardValue;
 
     const pressure =
-      [...categorySummary].sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap))[0] || {};
+      [...categorySummary].sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap))[0] ||
+      {};
 
     res.json({
       stock,
-      inward,
-      issuance,
       totals: {
         inventoryStockValue:
           categorySummary.find((r) => r.category === "Inventory")?.stockValue || 0,
         nonInventoryStockValue:
           categorySummary.find((r) => r.category === "Non Inventory")?.stockValue || 0,
-        totalStockValue,
-        totalInwardValue,
-        totalIssuanceValue,
-        totalItems: categorySummary.reduce((s, r) => s + r.items, 0),
-        issuanceGap,
+        servicesStockValue:
+          categorySummary.find((r) => r.category === "Services")?.stockValue || 0,
+        pattyCashStockValue:
+          categorySummary.find((r) => r.category === "Patty Cash")?.stockValue || 0,
+        totalStockValue: money(totalStockValue),
+        totalInwardValue: money(totalInwardValue),
+        totalIssuanceValue: money(totalIssuanceValue),
+        totalItems: categorySummary.reduce((sum, row) => sum + n(row.items), 0),
+        issuanceGap: money(issuanceGap),
       },
       quickBoard: [
         {
@@ -322,8 +399,23 @@ exports.master = async (req, res, next) => {
           nextAction: pressure.nextAction || "Keep monitored",
           owner: "Procurement",
         },
+        {
+          label: "Month Data",
+          current: monthly.filter(
+            (m) => n(m.inwardTotal) > 0 || n(m.issuanceTotal) > 0
+          ).length,
+          signal: "Watch",
+          nextAction: "Review month wise values",
+          owner: "Reporting",
+        },
       ],
       categorySummary,
+      monthly,
+      debug: {
+        transactionsCount: transactions.length,
+        inwardTotal: money(totalInwardValue),
+        issuanceTotal: money(totalIssuanceValue),
+      },
     });
   } catch (e) {
     next(e);
@@ -334,9 +426,7 @@ exports.machine = async (req, res, next) => {
   try {
     const { equipmentList, equipmentMap } = await buildEquipmentListAndMap();
 
-    const transactions = await Transaction.find({
-      type: "issuance",
-    }).lean();
+    const transactions = await Transaction.find({}).lean();
 
     const machines = new Map();
 
@@ -366,13 +456,14 @@ exports.machine = async (req, res, next) => {
     });
 
     transactions.forEach((tx) => {
-      const date = getTxDate(tx);
+      if (!isIssuanceType(tx.type)) return;
+
+      const date = getAnyDate(tx);
       const month = getMonthByDate(date);
       if (!month) return;
 
       const rawEquipment = getRawEquipment(tx);
       const equipmentName = resolveEquipmentName(rawEquipment, equipmentMap);
-
       if (!equipmentName) return;
 
       const machineKey = norm(equipmentName);
