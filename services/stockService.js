@@ -1,8 +1,8 @@
 const StockItem = require("../models/StockItem");
 const Transaction = require("../models/Transaction");
 
-function number(v) {
-  const n = Number(v);
+function number(value) {
+  const n = Number(String(value ?? "").replace(/,/g, "").trim());
   return Number.isFinite(n) ? n : 0;
 }
 
@@ -19,11 +19,10 @@ function regexExact(value) {
 }
 
 /*
-  Stock lookup rule:
+  Lookup rule:
   1. Pehle exact itemCode + category
   2. Phir case-insensitive itemCode + category
   3. Phir sirf itemCode
-  Is se save button par "Item Code not found in selected category" issue nahi aaye ga.
 */
 async function lookupItem(itemCode, category) {
   const code = cleanText(itemCode);
@@ -130,19 +129,40 @@ async function applyTransactionPayload(payload, type, existingTransaction = null
       throw err;
     }
 
+    const itemPrice = number(item.unitPrice);
+
     payload.balanceQty = availableForEdit - newQty;
-    payload.total = newQty * number(item.unitPrice);
+    payload.unitPrice = itemPrice;
+    payload.total = newQty * itemPrice;
   } else {
     const qty = number(payload.qtyReceived);
 
+    /*
+      IMPORTANT:
+      Inward me sheet wali Unit Price aur Total preserve karo.
+      Stock item ki old price se overwrite nahi karna.
+    */
+    const sheetUnitPrice = number(payload.unitPrice);
+    const sheetTotal = number(payload.total);
+
+    let finalUnitPrice = sheetUnitPrice;
+
+    if (!finalUnitPrice && qty > 0 && sheetTotal > 0) {
+      finalUnitPrice = sheetTotal / qty;
+    }
+
+    if (!finalUnitPrice) {
+      finalUnitPrice = number(item.unitPrice);
+    }
+
     payload.openQty = number(currentStock.balanceQty);
-    payload.total = qty * number(item.unitPrice);
+    payload.unitPrice = finalUnitPrice;
+    payload.total = sheetTotal > 0 ? sheetTotal : qty * finalUnitPrice;
   }
 
   payload.itemCode = cleanText(item.itemCode);
   payload.itemDescription = cleanText(item.itemDescription);
   payload.uom = cleanText(item.uom);
-  payload.unitPrice = number(item.unitPrice);
   payload.category = cleanText(item.category);
 
   return payload;
